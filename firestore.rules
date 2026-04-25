@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      // In a real app, you'd check a dedicated 'admins' collection or a field in the 'users' doc.
+      // For now, let's look up if the user exists in a hypothetical 'admins' collection.
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // --- Validations ---
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'role']) &&
+             data.keys().size() >= 4 &&
+             data.uid is string && data.uid.size() <= 128 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.role in ['student', 'admin'];
+    }
+
+    function isValidEnquiry(data) {
+      return data.keys().hasAll(['name', 'email', 'subject', 'message', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.subject is string && data.subject.size() <= 200 &&
+             data.message is string && data.message.size() <= 2000 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidReferral(data) {
+      return data.keys().hasAll(['referredUid', 'name', 'createdAt']) &&
+             data.keys().size() == 3 &&
+             data.referredUid is string &&
+             data.name is string &&
+             data.createdAt == request.time;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      
+      allow create: if isSignedIn() && 
+                    request.auth.uid == userId && 
+                    isValidUser(incoming());
+                    
+      allow update: if isOwner(userId) && 
+                    isValidUser(incoming()) &&
+                    incoming().uid == existing().uid &&
+                    incoming().email == existing().email &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['name', 'referralCode', 'referredBy', 'referralCount', 'referralRewards', 'role']);
+                    
+      allow delete: if isAdmin();
+
+      match /referrals/{refId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isSignedIn() && isValidReferral(incoming()) && incoming().referredUid == request.auth.uid;
+      }
+    }
+
+    match /enquiries/{enquiryId} {
+      allow read: if isAdmin();
+      allow create: if isValidEnquiry(incoming());
+      allow update, delete: if isAdmin();
+    }
+    
+    // Admins collection - managed manually or via server
+    match /admins/{userId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Only manageable via Firebase Console or Admin SDK
+    }
+  }
+}
